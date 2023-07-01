@@ -76,6 +76,6 @@ def AAD(shape_eeg, ELE, sources=2):
     model.compile(loss=['sparse_categorical_crossentropy', 'mean_squared_error'],
                   loss_weights=[1, 0],    # attn_coef is only output; it does not involve backpropagation
                   optimizer=tfa.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-7, epsilon=1e-3, amsgrad=True),
-                  metrics=[['sparse_categorical_accuracy'], ['mean_squared_error']])
+                  metrics=[['sparse_categorical_accuracy'], []])
     model.summary()
     return model
