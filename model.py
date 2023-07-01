@@ -5,7 +5,7 @@ import numpy as np
 import eeg_positions
 import spektral
 
-def AAD(shape_eeg, ELE, sources=2):
+def ASAD(shape_eeg, ELE, sources=2):
     """ Parameters:
         shape_eeg:     tuple, shape of EEG (channel, feature).
         ELE:           list, names of EEG electrodes in 'str'. Each element in turn corresponds to a row in EEG.
