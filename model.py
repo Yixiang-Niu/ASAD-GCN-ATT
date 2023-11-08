@@ -5,8 +5,42 @@ import eeg_positions
 import spektral
 
 def squareplus(x):
+    """
+    Activation function
+    """
     b = 4
-    return 0.5* (tf.math.sqrt(tf.math.pow(x,2) +b) +x)
+    return 0.5 * (tf.math.sqrt(tf.math.pow(x, 2) + b) + x)
+
+class Aij(tf.keras.layers.Layer):
+    """
+    Attention coefficient matrix in GAT, referring to
+    Petar Veličković et al. Graph Attention Networks 2018 ICLR
+    """
+    def __init__(self):
+        super(Aij, self).__init__(trainable=True)
+
+    def build(self, input_shape):
+        features = input_shape[2]
+
+        attn_heads = 1
+        self.kernel = self.add_weight(name="kernel", shape=[features, attn_heads, features])
+        self.attn_kernel_self = self.add_weight(name="attn_kernel_self", shape=[features, attn_heads, 1])
+        self.attn_kernel_neighs = self.add_weight(name="attn_kernel_neighs", shape=[features, attn_heads, 1])
+
+        super(Aij, self).build(input_shape)
+
+    def call(self, encode):
+        encode = tf.einsum("...NI , IHO -> ...NHO", encode, self.kernel)
+        attn_for_self = tf.einsum("...NHI , IHO -> ...NHO", encode, self.attn_kernel_self)
+        attn_for_neighs = tf.einsum("...NHI , IHO -> ...NHO", encode, self.attn_kernel_neighs)
+        attn_for_neighs = tf.einsum("...ABC -> ...CBA", attn_for_neighs)
+
+        attn_coef = attn_for_self + attn_for_neighs
+        attn_coef = tf.nn.leaky_relu(attn_coef, alpha=0.2)
+        attn_coef = tf.nn.softmax(attn_coef, axis=-1)
+
+        attn_coef = tf.math.reduce_mean(attn_coef, axis=2, keepdims=False)
+        return attn_coef
     
 def ASAD(shape_eeg, ELE, sources=2):
     """ Parameters:
@@ -17,6 +51,17 @@ def ASAD(shape_eeg, ELE, sources=2):
     # Input
     inputs = tf.keras.Input(shape=shape_eeg)
     eeg = inputs
+
+    boundary = int(shape_eeg[1] /1.5)
+    DE, HOC = tf.split(eeg, [boundary,tf.shape(eeg)[2]-boundary], axis=-1)
+
+    LN_DE = tf.keras.layers.LayerNormalization(axis=-2)    # Layer normalization across EEG channel axis
+    DE = LN_DE(DE)
+
+    LN_HOC = tf.keras.layers.LayerNormalization(axis=-2)
+    HOC = LN_HOC(HOC)
+
+    eeg = tf.keras.layers.concatenate([DE, HOC], axis=-1)
     
     # GCN
     coordinate = eeg_positions.get_elec_coords(elec_names=ELE, dim='3d')
@@ -31,12 +76,12 @@ def ASAD(shape_eeg, ELE, sources=2):
             if row == col:
                 distance[row,col] = np.inf
             elif col > row:
-                distance[row,col] = np.linalg.norm(xyz[row,:] - xyz[col,:])
+                distance[row,col] = np.linalg.norm(xyz[row,:] - xyz[col,:])    # dij
             else:
                 distance[row,col] = distance[col,row]
 
-    AdjMat = np.reciprocal(np.square(distance))
-    AdjMat = (AdjMat - np.min(AdjMat)) / (np.max(AdjMat) - np.min(AdjMat))
+    AdjMat = np.reciprocal(np.square(distance))    # Aij = 1 / dij**2    Aii = 0
+    AdjMat = (AdjMat - np.min(AdjMat)) / (np.max(AdjMat) - np.min(AdjMat))    # Min-max normalization
 
     AdjMat = spektral.utils.gcn_filter(AdjMat, symmetric=True)
     GCN = spektral.layers.GCNConv(eeg.shape[2], activation=squareplus, use_bias=True, kernel_initializer='he_normal')
@@ -45,40 +90,27 @@ def ASAD(shape_eeg, ELE, sources=2):
     BN = tf.keras.layers.BatchNormalization()    # Batch-wise graph normalization
     eeg = BN(eeg)
     
-    # Global attention
-    NumNod = eeg.shape[1]
-    AdjMat1 = tf.ones([NumNod, NumNod], tf.float32)
-    AdjMat1 = tf.expand_dims(AdjMat1, 0)
-    multiples = tf.stack([tf.shape(eeg)[0], tf.constant(1), tf.constant(1)], axis=0)
-    AdjMat1 = tf.tile(AdjMat1, multiples)
+    # Global attention-based readout
+    attn_coef = Aij()(eeg)    # global attention coefficients
+    Attn_coef = tf.math.reduce_mean(attn_coef, axis=1)    # Weights
 
-    GAT = spektral.layers.GATConv(round(eeg.shape[2]), attn_heads=3, concat_heads=False, dropout_rate=0, return_attn_coef=True,
-                                  add_self_loops=False, activation='softplus', use_bias=True, kernel_initializer='he_uniform')
-
-    eeg, attn_coef = GAT([eeg, AdjMat1])
-    attn_coef = tf.math.reduce_mean(attn_coef, axis=2, keepdims=False)    # average attention coefficient matrix of several attention heads
-
-    BN1 = tf.keras.layers.BatchNormalization()
-    eeg = BN1(eeg)
-    
-    # Readout
-    eeg = tf.concat([spektral.layers.GlobalAvgPool()(eeg), spektral.layers.GlobalMaxPool()(eeg)], -1)
+    Attn_coef = tf.expand_dims(Attn_coef, -1)
+    Attn_coef = tf.tile(Attn_coef, tf.constant([1,1,eeg.shape[2]]))
+    eeg = tf.math.multiply_no_nan(Attn_coef, eeg)
+    eeg = tf.math.reduce_sum(eeg, axis=1)
     
     # Classification
-    Dense0 = tf.keras.layers.Dense(math.ceil(eeg.shape[1] /1.5), activation='softplus', kernel_initializer='he_uniform')
-    eeg = Dense0(eeg)
-
-    Dense1 = tf.keras.layers.Dense(math.ceil(eeg.shape[1] /2), activation='softplus', kernel_initializer='he_uniform')
-    eeg = Dense1(eeg)
+    Dense = tf.keras.layers.Dense(math.ceil(eeg.shape[1] /2), activation=squareplus, kernel_initializer='he_normal')
+    eeg = Dense(eeg)
 
     Softmax = tf.keras.layers.Dense(sources, activation='softmax', name='label')
     label = Softmax(eeg)
     
     # Building a model
     model = tf.keras.Model(inputs=inputs, outputs=[label, attn_coef], name='AAD-GCN-GAT')
-    model.compile(loss=['sparse_categorical_crossentropy', 'mean_squared_error'],
-                  loss_weights=[1, 0],    # attn_coef is only output; it does not involve backpropagation
-                  optimizer=tfa.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-7, epsilon=1e-3, amsgrad=True),
+    model.compile(loss=['sparse_categorical_crossentropy', []],
+                  loss_weights=[1, 0],    # attn_coef does not involve backpropagation
+                  optimizer=tfa.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-3, amsgrad=True),
                   metrics=[['sparse_categorical_accuracy'], []])
     model.summary()
     return model
