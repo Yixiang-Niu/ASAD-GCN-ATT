@@ -1,10 +1,13 @@
 import tensorflow as tf
 import tensorflow_addons as tfa
 import numpy as np
-
 import eeg_positions
 import spektral
 
+def squareplus(x):
+    b = 4
+    return 0.5* (tf.math.sqrt(tf.math.pow(x,2) +b) +x)
+    
 def ASAD(shape_eeg, ELE, sources=2):
     """ Parameters:
         shape_eeg:     tuple, shape of EEG (channel, feature).
@@ -28,21 +31,21 @@ def ASAD(shape_eeg, ELE, sources=2):
             if row == col:
                 distance[row,col] = np.inf
             elif col > row:
-                distance[row,col] = np.linalg.norm(xyz[row,:] - xyz[col,:])**2
+                distance[row,col] = np.linalg.norm(xyz[row,:] - xyz[col,:])
             else:
                 distance[row,col] = distance[col,row]
 
-    AdjMat0 = np.reciprocal(distance)
-    AdjMat0 = (AdjMat0 - np.min(AdjMat0)) / (np.max(AdjMat0) - np.min(AdjMat0))
+    AdjMat = np.reciprocal(np.square(distance))
+    AdjMat = (AdjMat - np.min(AdjMat)) / (np.max(AdjMat) - np.min(AdjMat))
 
-    AdjMat0 = spektral.utils.gcn_filter(AdjMat0, symmetric=True)
-    GCN = spektral.layers.GCNConv(round(eeg.shape[2]), activation='softplus', use_bias=True, kernel_initializer='he_uniform')
-    eeg = GCN([eeg, AdjMat0])
+    AdjMat = spektral.utils.gcn_filter(AdjMat, symmetric=True)
+    GCN = spektral.layers.GCNConv(eeg.shape[2], activation=squareplus, use_bias=True, kernel_initializer='he_normal')
+    eeg = GCN([eeg, AdjMat])
 
-    BN0 = tf.keras.layers.BatchNormalization()
-    eeg = BN0(eeg)
+    BN = tf.keras.layers.BatchNormalization()    # Batch-wise graph normalization
+    eeg = BN(eeg)
     
-    # GAT
+    # Global attention
     NumNod = eeg.shape[1]
     AdjMat1 = tf.ones([NumNod, NumNod], tf.float32)
     AdjMat1 = tf.expand_dims(AdjMat1, 0)
