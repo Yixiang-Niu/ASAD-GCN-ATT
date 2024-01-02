@@ -107,7 +107,7 @@ def ASAD(shape_eeg, ELE, sources=2):
     label = Softmax(eeg)
     
     # Building a model
-    model = tf.keras.Model(inputs=inputs, outputs=[label, attn_coef], name='AAD-GCN-GAT')
+    model = tf.keras.Model(inputs=inputs, outputs=[label, attn_coef])
     model.compile(loss=['sparse_categorical_crossentropy', []],
                   loss_weights=[1, 0],    # attn_coef does not involve backpropagation
                   optimizer=tfa.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-3, amsgrad=True),
